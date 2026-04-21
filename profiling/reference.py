@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import math
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -62,8 +62,6 @@ PRESET_CONFIGS: dict[str, ModelConfig] = {
     "gpt-oss-120b": GPT_OSS_120B_PRESET,
     "custom": ModelConfig(),
 }
-
-MODEL_CONFIG_FIELDS = tuple(field.name for field in fields(ModelConfig))
 
 
 @dataclass(slots=True, frozen=True)
@@ -754,7 +752,6 @@ def run_workload_sweep(
 def _group_keys(df: pd.DataFrame) -> list[str]:
     candidate_columns = [
         "preset_name",
-        *MODEL_CONFIG_FIELDS,
         "device",
         "prefill_tokens",
         "generated_tokens",
@@ -806,6 +803,7 @@ def summarize_results(rows: pd.DataFrame | list[dict[str, Any]]) -> dict[str, pd
             "level0_metrics": empty,
             "level1": empty,
             "level2": empty,
+            "level2_full": empty,
         }
 
     workload_keys = _group_keys(df)
@@ -840,6 +838,25 @@ def summarize_results(rows: pd.DataFrame | list[dict[str, Any]]) -> dict[str, pd
     level0_metrics["decode_tok_s"] = decode_steps / (
         level0_metrics["decode_total"] / 1000.0
     ).where(level0_metrics["decode_total"] > 0)
+    ordered_level0_columns = [
+        column
+        for column in [
+            "preset_name",
+            "device",
+            "prefill_tokens",
+            "generated_tokens",
+            "prefill_total",
+            "decode_total",
+            "workload_total",
+            "avg_ms_per_new_token",
+            "prefill_tok_s",
+            "decode_tok_s",
+            "decode_steps",
+            "seed",
+        ]
+        if column in level0_metrics.columns
+    ]
+    level0_metrics = level0_metrics[ordered_level0_columns]
 
     level1_iteration = (
         df[df["level"] == 1]
@@ -856,6 +873,26 @@ def summarize_results(rows: pd.DataFrame | list[dict[str, Any]]) -> dict[str, pd
         pd.concat((level1_iteration, level1_combined), ignore_index=True),
         workload_keys + ["phase", "component", "scope_name"],
     )
+    ordered_level1_columns = [
+        column
+        for column in [
+            "preset_name",
+            "device",
+            "prefill_tokens",
+            "generated_tokens",
+            "phase",
+            "component",
+            "scope_name",
+            "mean_duration_ms",
+            "std_duration_ms",
+            "min_duration_ms",
+            "max_duration_ms",
+            "sample_count",
+            "seed",
+        ]
+        if column in level1_summary.columns
+    ]
+    level1_summary = level1_summary[ordered_level1_columns]
 
     level2_iteration = df[df["level"] == 2].copy()
     level2_phase_keys = workload_keys + [
@@ -866,10 +903,65 @@ def summarize_results(rows: pd.DataFrame | list[dict[str, Any]]) -> dict[str, pd
         "phase",
     ]
     level2_combined = _combined_phase_rows(level2_iteration, level2_phase_keys)
-    level2_summary = _aggregate_scope_rows(
+    level2_full = _aggregate_scope_rows(
         pd.concat((level2_iteration, level2_combined), ignore_index=True),
         workload_keys + ["phase", "component", "layer_idx", "scope_name"],
     )
+    ordered_level2_full_columns = [
+        column
+        for column in [
+            "preset_name",
+            "device",
+            "prefill_tokens",
+            "generated_tokens",
+            "phase",
+            "component",
+            "layer_idx",
+            "scope_name",
+            "mean_duration_ms",
+            "std_duration_ms",
+            "min_duration_ms",
+            "max_duration_ms",
+            "sample_count",
+            "seed",
+        ]
+        if column in level2_full.columns
+    ]
+    level2_full = level2_full[ordered_level2_full_columns]
+
+    level2_compact_iteration = (
+        pd.concat((level2_iteration, level2_combined), ignore_index=True)
+        .groupby(
+            workload_keys + ["iteration", "phase", "component", "scope_name"],
+            dropna=False,
+        )["duration_ms"]
+        .sum()
+        .reset_index()
+    )
+    level2_summary = _aggregate_scope_rows(
+        level2_compact_iteration,
+        workload_keys + ["phase", "component", "scope_name"],
+    )
+    ordered_level2_columns = [
+        column
+        for column in [
+            "preset_name",
+            "device",
+            "prefill_tokens",
+            "generated_tokens",
+            "phase",
+            "component",
+            "scope_name",
+            "mean_duration_ms",
+            "std_duration_ms",
+            "min_duration_ms",
+            "max_duration_ms",
+            "sample_count",
+            "seed",
+        ]
+        if column in level2_summary.columns
+    ]
+    level2_summary = level2_summary[ordered_level2_columns]
 
     return {
         "raw": raw,
@@ -877,6 +969,7 @@ def summarize_results(rows: pd.DataFrame | list[dict[str, Any]]) -> dict[str, pd
         "level0_metrics": level0_metrics,
         "level1": level1_summary,
         "level2": level2_summary,
+        "level2_full": level2_full,
     }
 
 
