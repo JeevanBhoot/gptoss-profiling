@@ -13,10 +13,11 @@ The notebook uses dummy BF16 weights and the forward path in `model.py`. It does
 
 ## Notebook
 
-- Edit model presets or override any `ModelConfig` field
-- Run preflight memory checks for dense BF16 reference weights
+- Edit any `ModelConfig` field directly in the top config cell
+- Start with `prefill_tokens=1`, `generated_tokens=1`, `warmup_iters=0`, `measure_iters=1`
+- Run preflight before running the model
 - Measure level 0, level 1, and level 2 timings
-- Sweep prefill and generated-token workloads
+- Enable sweeps only after a safe single run
 - Export optional `torch.profiler` Chrome traces
 
 ## Files

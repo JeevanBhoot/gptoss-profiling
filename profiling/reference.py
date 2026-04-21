@@ -16,8 +16,8 @@ from model import ModelConfig, Transformer, get_active_profiler, set_active_prof
 BF16_BYTES = 2
 FP32_BYTES = 4
 
-DEFAULT_PREFILL_SWEEP = [128, 512, 2048, 8192]
-DEFAULT_GENERATED_SWEEP = [1, 16, 64]
+DEFAULT_PREFILL_SWEEP = [1, 8, 32, 128]
+DEFAULT_GENERATED_SWEEP = [1, 2, 4]
 
 GPT_OSS_20B_PRESET = ModelConfig(
     num_hidden_layers=24,
@@ -74,8 +74,8 @@ class WorkloadConfig:
 
 @dataclass(slots=True)
 class TimingConfig:
-    warmup_iters: int = 2
-    measure_iters: int = 5
+    warmup_iters: int = 0
+    measure_iters: int = 1
     seed: int = 0
     enable_torch_profiler: bool = False
     trace_output_dir: str | Path | None = None
@@ -197,26 +197,12 @@ def _weight_memory_bytes(config: ModelConfig) -> dict[str, int]:
     }
 
 
-def preflight_report(
-    arch_cfg: ModelConfig | dict[str, Any],
-    workload_cfg: WorkloadConfig | dict[str, Any],
-    device: str | torch.device = "cuda",
-) -> dict[str, Any]:
-    config = _as_model_config(arch_cfg)
-    workload = (
-        workload_cfg
-        if isinstance(workload_cfg, WorkloadConfig)
-        else WorkloadConfig(**workload_cfg)
-    )
-    resolved_device = torch.device(device)
-
+def _runtime_memory_breakdown(
+    config: ModelConfig, max_sequence_length: int
+) -> dict[str, int | str]:
     qkv_dim = config.head_dim * (
         config.num_attention_heads + 2 * config.num_key_value_heads
     )
-    max_sequence_length = workload.prefill_tokens + max(workload.generated_tokens - 1, 0)
-
-    params = _parameter_breakdown(config)
-    weights = _weight_memory_bytes(config)
 
     hidden_state_bytes = max_sequence_length * config.hidden_size * BF16_BYTES
     attention_qkv_bytes = max_sequence_length * qkv_dim * BF16_BYTES
@@ -232,26 +218,103 @@ def preflight_report(
         * (2 * config.intermediate_size + config.hidden_size)
         * BF16_BYTES
     )
+    logits_bytes = max_sequence_length * config.vocab_size * BF16_BYTES
+
+    moe_mlp1_gather_bytes = (
+        max_sequence_length
+        * config.experts_per_token
+        * 2
+        * config.intermediate_size
+        * config.hidden_size
+        * BF16_BYTES
+    )
+    moe_mlp1_bias_bytes = (
+        max_sequence_length
+        * config.experts_per_token
+        * 2
+        * config.intermediate_size
+        * BF16_BYTES
+    )
+    moe_mlp2_gather_bytes = (
+        max_sequence_length
+        * config.experts_per_token
+        * config.hidden_size
+        * config.intermediate_size
+        * BF16_BYTES
+    )
+    moe_mlp2_bias_bytes = (
+        max_sequence_length
+        * config.experts_per_token
+        * config.hidden_size
+        * BF16_BYTES
+    )
+
     rough_activation_bytes = (
         hidden_state_bytes
         + attention_qkv_bytes
         + attention_scores_bytes
         + moe_activation_bytes
     )
-    estimated_required_bytes = weights["dense_weight_bytes"] + rough_activation_bytes
+    moe_mlp1_temp_bytes = moe_mlp1_gather_bytes + moe_mlp1_bias_bytes
+    moe_mlp2_temp_bytes = moe_mlp2_gather_bytes + moe_mlp2_bias_bytes
 
-    report = {
-        **params,
-        **weights,
-        "prefill_tokens": workload.prefill_tokens,
-        "generated_tokens": workload.generated_tokens,
-        "max_sequence_length": max_sequence_length,
+    peak_runtime_candidates = {
+        "rough_activation_bytes": rough_activation_bytes,
+        "logits_bytes": logits_bytes,
+        "moe_mlp1_temp_bytes": moe_mlp1_temp_bytes,
+        "moe_mlp2_temp_bytes": moe_mlp2_temp_bytes,
+    }
+    peak_runtime_component, peak_runtime_bytes = max(
+        peak_runtime_candidates.items(), key=lambda item: item[1]
+    )
+
+    return {
         "hidden_state_bytes": hidden_state_bytes,
         "attention_qkv_bytes": attention_qkv_bytes,
         "rough_attention_working_set_bytes": attention_scores_bytes,
         "rough_moe_activation_bytes": moe_activation_bytes,
         "rough_activation_bytes": rough_activation_bytes,
-        "estimated_required_bytes": estimated_required_bytes,
+        "logits_bytes": logits_bytes,
+        "moe_mlp1_gather_bytes": moe_mlp1_gather_bytes,
+        "moe_mlp1_bias_bytes": moe_mlp1_bias_bytes,
+        "moe_mlp1_temp_bytes": moe_mlp1_temp_bytes,
+        "moe_mlp2_gather_bytes": moe_mlp2_gather_bytes,
+        "moe_mlp2_bias_bytes": moe_mlp2_bias_bytes,
+        "moe_mlp2_temp_bytes": moe_mlp2_temp_bytes,
+        "peak_runtime_component": peak_runtime_component,
+        "peak_runtime_bytes": peak_runtime_bytes,
+    }
+
+
+def preflight_report(
+    arch_cfg: ModelConfig | dict[str, Any],
+    workload_cfg: WorkloadConfig | dict[str, Any],
+    device: str | torch.device = "cuda",
+) -> dict[str, Any]:
+    config = _as_model_config(arch_cfg)
+    workload = (
+        workload_cfg
+        if isinstance(workload_cfg, WorkloadConfig)
+        else WorkloadConfig(**workload_cfg)
+    )
+    resolved_device = torch.device(device)
+
+    max_sequence_length = workload.prefill_tokens + max(workload.generated_tokens - 1, 0)
+
+    params = _parameter_breakdown(config)
+    weights = _weight_memory_bytes(config)
+    runtime = _runtime_memory_breakdown(config, max_sequence_length)
+    estimated_peak_bytes = weights["dense_weight_bytes"] + runtime["peak_runtime_bytes"]
+
+    report = {
+        **params,
+        **weights,
+        **runtime,
+        "prefill_tokens": workload.prefill_tokens,
+        "generated_tokens": workload.generated_tokens,
+        "max_sequence_length": max_sequence_length,
+        "estimated_peak_bytes": estimated_peak_bytes,
+        "estimated_required_bytes": estimated_peak_bytes,
         "device": str(resolved_device),
         "device_free_bytes": None,
         "device_total_bytes": None,
@@ -262,7 +325,7 @@ def preflight_report(
         free_bytes, total_bytes = torch.cuda.mem_get_info(resolved_device)
         report["device_free_bytes"] = int(free_bytes)
         report["device_total_bytes"] = int(total_bytes)
-        report["fits_free_memory"] = estimated_required_bytes <= free_bytes
+        report["fits_free_memory"] = estimated_peak_bytes <= free_bytes
 
     return report
 
@@ -273,32 +336,33 @@ def _raise_if_not_runnable(report: dict[str, Any], device: torch.device) -> None
     fits = report.get("fits_free_memory")
     if fits is None or fits:
         return
-    required = format_bytes(report["estimated_required_bytes"])
+    required = format_bytes(report["estimated_peak_bytes"])
     free = format_bytes(report["device_free_bytes"])
     weights = format_bytes(report["dense_weight_bytes"])
-    activations = format_bytes(report["rough_activation_bytes"])
+    runtime_peak = format_bytes(report["peak_runtime_bytes"])
+    runtime_component = report["peak_runtime_component"]
     raise MemoryError(
         "Selected configuration is unlikely to fit on the target device in the "
         "reference BF16 implementation. "
-        f"Estimated required: {required} (weights {weights}, rough activations "
-        f"{activations}); free device memory: {free}."
+        f"Estimated peak: {required} (weights {weights}, peak runtime "
+        f"{runtime_peak} from {runtime_component}); free device memory: {free}."
     )
 
 
-def _raise_if_activations_do_not_fit(
-    report: dict[str, Any], device: torch.device, activation_required_bytes: int
+def _raise_if_runtime_memory_does_not_fit(
+    report: dict[str, Any], device: torch.device, runtime_required_bytes: int
 ) -> None:
     if device.type != "cuda":
         return
     free_bytes = report.get("device_free_bytes")
-    if free_bytes is None or activation_required_bytes <= free_bytes:
+    if free_bytes is None or runtime_required_bytes <= free_bytes:
         return
-    required = format_bytes(activation_required_bytes)
+    required = format_bytes(runtime_required_bytes)
     free = format_bytes(free_bytes)
     raise MemoryError(
         "Selected workload is unlikely to fit on the target device with the existing "
         "reference model instance. "
-        f"Required rough activation memory: {required}; free device memory: {free}."
+        f"Required peak runtime memory: {required}; free device memory: {free}."
     )
 
 
@@ -578,12 +642,12 @@ def run_workload(
         _raise_if_not_runnable(report, resolved_device)
     else:
         report["weights_already_loaded"] = True
-        report["runtime_required_bytes"] = report["rough_activation_bytes"]
+        report["runtime_required_bytes"] = report["peak_runtime_bytes"]
         if report.get("device_free_bytes") is not None:
             report["fits_free_memory"] = (
                 report["runtime_required_bytes"] <= report["device_free_bytes"]
             )
-        _raise_if_activations_do_not_fit(
+        _raise_if_runtime_memory_does_not_fit(
             report, resolved_device, report["runtime_required_bytes"]
         )
 
