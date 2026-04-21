@@ -1,0 +1,16 @@
+[project]
+name = "gpt-oss-reference-profiling"
+version = "0.1.0"
+description = "Notebook helpers for profiling the GPT-OSS reference PyTorch implementation."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.4",
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "seaborn>=0.13",
+]
+
+[tool.uv]
+package = false
