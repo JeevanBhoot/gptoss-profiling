@@ -7,17 +7,15 @@ The notebook uses dummy BF16 weights and the forward path in `model.py`. It does
 ## Setup
 
 1. Run `uv sync`.
-2. Install a CUDA-compatible PyTorch build for the target machine.
-3. Start Jupyter with `uv run jupyter lab`.
-4. Open `notebooks/gpt_oss_reference_profile.ipynb`.
+2. Start Jupyter with `uv run jupyter lab`.
+3. Open `notebooks/gpt_oss_reference_profile.ipynb`.
 
 ## Notebook
 
-- Edit any `ModelConfig` field directly in the top config cell
-- Start with `prefill_tokens=1`, `generated_tokens=1`, `warmup_iters=0`, `measure_iters=1`
-- Run preflight before running the model
+- Edit model presets or override any `ModelConfig` field
+- Run preflight memory checks for dense BF16 reference weights
 - Measure level 0, level 1, and level 2 timings
-- Enable sweeps only after a safe single run
+- Sweep prefill and generated-token workloads
 - Export optional `torch.profiler` Chrome traces
 
 ## Files
